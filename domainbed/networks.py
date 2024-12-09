@@ -114,6 +114,21 @@ class ResNet(torch.nn.Module):
             if isinstance(m, nn.BatchNorm2d):
                 m.eval()
 
+    def get_grads(self):
+        grads = []
+        for p in self.network.parameters():
+            grads.append(p.grad.data.clone().flatten())
+        return torch.cat(grads)
+    
+
+    def set_grads(self, new_grads):
+        start = 0
+        for k, p in enumerate(self.network.parameters()):
+            dims = p.shape
+            end = start + dims.numel()
+            p.grad.data = new_grads[start:end].reshape(dims)
+            start = end
+
 
 class MNIST_CNN(nn.Module):
     """
@@ -194,3 +209,5 @@ def Featurizer(input_shape, hparams):
         return ResNet(input_shape, hparams)
     else:
         raise NotImplementedError(f"Input shape {input_shape} is not supported")
+    
+

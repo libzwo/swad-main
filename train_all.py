@@ -55,6 +55,8 @@ def main():
         help="[fast, all]. if fast, ignore train_in datasets in evaluation time.",
     )
     parser.add_argument("--prebuild_loader", action="store_true", help="Pre-build eval loaders")
+    parser.add_argument("--soft_flag", action="store_true")
+    parser.add_argument("--num_cluster", type=int, default=8)
     args, left_argv = parser.parse_known_args()
 
     # setup hparams
@@ -140,6 +142,9 @@ def main():
     n_steps = (n_steps // checkpoint_freq) * checkpoint_freq + 1
     logger.info(f"n_steps is updated to {org_n_steps} => {n_steps} for checkpointing")
 
+    soft_flag =  args.soft_flag
+    num_cluster = args.num_cluster
+
     if not args.test_envs:
         args.test_envs = [[te] for te in range(len(dataset))]
     logger.info(f"Target test envs = {args.test_envs}")
@@ -149,7 +154,6 @@ def main():
     ###########################################################################
     all_records = []
     results = collections.defaultdict(list)
-
     for test_env in args.test_envs:
         res, records = train(
             test_env,
@@ -159,6 +163,8 @@ def main():
             checkpoint_freq=checkpoint_freq,
             logger=logger,
             writer=writer,
+            soft_flag=soft_flag,
+            num_cluster=num_cluster
         )
         all_records.append(records)
         for k, v in res.items():

@@ -24,6 +24,11 @@ from domainbed.models.resnet_mixstyle2 import (
     resnet50_mixstyle2_L234_p0d5_a0d1,
 )
 
+from sklearn.cluster import KMeans
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+
 
 def to_minibatch(x, y):
     minibatches = list(zip(x, y))
@@ -77,12 +82,168 @@ class Algorithm(torch.nn.Module):
         return clone
 
 
+class LatentWeight(Algorithm):
+
+    def __init__(self, input_shape, num_classes, num_domains, hparams, soft_flag, num_cluster):
+        super(LatentWeight, self).__init__(input_shape, num_classes, num_domains, hparams)
+        self.network = networks.ResNet(input_shape=input_shape, hparams=hparams)
+        self.optimizer = get_optimizer(
+            hparams["optimizer"],
+            self.network.parameters(),
+            lr=self.hparams["lr"],
+            weight_decay=self.hparams["weight_decay"],
+        )
+        self.n_clusters = num_cluster
+        self.loss_fn = torch.nn.CrossEntropyLoss()
+        self.soft_flag = soft_flag
+
+    def update(self, x, y, **kwargs):
+        all_x = torch.cat(x)
+        all_y = torch.cat(y)
+        grads = []
+        imp = []
+        train_loss = 0.0
+
+        low_feat = self.get_low_feature(all_x)
+        # feat_xy = {'x': low_feat, 'y': all_y}
+        mean, std = self.cal_mean_std(low_feat)
+        feature = torch.cat((mean, std), 1).data.cpu().numpy()
+        p_labels = self.cluster(feature, n_clusters=self.n_clusters)
+
+        label_tensor = torch.tensor(p_labels)
+        
+        max_label = self.n_clusters
+        p_x = [[] for _ in range(max_label)]
+        p_y = [[] for _ in range(max_label)]
+
+        for i, p_label in enumerate(p_labels):     
+            p_x[p_label].append(all_x[i])
+            p_y[p_label].append(all_y[i])
+
+        for i,p_xx in enumerate(p_x):
+            p_x[i] = torch.stack(p_xx, dim=0)
+
+        for i,p_yy in enumerate(p_y):
+            p_y[i] = torch.stack(p_yy, dim=0)
+
+        for(images, target) in zip(p_x, p_y):
+            
+            output = self.network(images)
+            loss = self.loss_fn(output, target)
+
+            train_loss += loss.item()
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            
+            grads.append(self.network.get_grads())
+
+        imp = generate_imp(grads)
+        imp_tensor = torch.stack(imp)
+        if self.soft_flag:
+            importance = F.softmax(imp_tensor, dim=0)
+        else:
+            importance = imp_tensor
+
+        weighted_grad = torch.zeros_like(grads[0])  # 初始化加权梯度为零张量
+        for imp, grad in zip(importance, grads):
+            weighted_grad += imp * grad  # 按照IMP值加权累加梯度
+
+        self.network.set_grads(weighted_grad)
+
+        self.optimizer.step()
+
+        self.optimizer.zero_grad()
+
+        return {"loss": loss.item()}
+
+    def predict(self, x):
+        return self.network(x)
+
+    def get_low_feature(self, x):
+
+        self.network.eval()
+
+        feat = self.network.network.conv1.forward(x)
+        feat = self.network.network.bn1.forward(feat)
+        feat = self.network.network.relu.forward(feat)
+        feat = self.network.network.maxpool.forward(feat)
+
+        feat1 = self.network.network.layer1(feat)
+        feat2 = self.network.network.layer2(feat1)
+
+        return feat1
+    
+    def cal_mean_std(self, feat):
+        eps = 1e-5
+        size = feat.size()
+        assert (len(size) == 4)
+        N, C = size[:2]
+        feat_var = feat.view(N, C, -1).var(dim=2) + eps
+        feat_std = feat_var.sqrt().view(N, C)
+        feat_mean = feat.view(N, C, -1).mean(dim=2).view(N, C)
+        return feat_mean, feat_std
+    
+    # def cluster(self, feature, n_clusters):
+    #     kmeans = KMeans(n_clusters=n_clusters)
+    #     I = kmeans.fit(feature)
+    #     labels = kmeans.labels_
+
+    #     # # 打印每个图片的聚类标签
+    #     # for i, label in enumerate(labels):
+    #     #     print(f"图片{i+1} 的聚类标签是：{label}")
+        
+    #     return labels
+    def cluster(self, feature, n_clusters):
+    # t-SNE 降维并可视化聚类前的特征分布
+        tsne = TSNE(n_components=2, random_state=42)
+        feature_2d_before = tsne.fit_transform(feature)
+        
+        plt.figure(figsize=(12, 5))
+
+        # 可视化聚类前的特征分布
+        plt.subplot(1, 2, 1)
+        plt.scatter(feature_2d_before[:, 0], feature_2d_before[:, 1], s=10, c='gray')
+        plt.title("Before Clustering", fontsize=18)
+        plt.xlabel("t-SNE Component 1", fontsize=16)
+        plt.ylabel("t-SNE Component 2", fontsize=16)
+        plt.savefig("tsne_before_clustering.png")  # 保存聚类前的可视化结果
+
+        # KMeans 聚类
+        kmeans = KMeans(n_clusters=n_clusters)
+        kmeans.fit(feature)
+        labels = kmeans.labels_
+
+        # t-SNE 降维并可视化聚类后的特征分布
+        feature_2d_after = tsne.fit_transform(feature)  # 重新t-SNE降维以对比聚类效果
+        plt.subplot(1, 2, 2)
+        plt.scatter(feature_2d_after[:, 0], feature_2d_after[:, 1], c=labels, cmap='viridis', s=10)
+        plt.title("After Clustering", fontsize=18)
+        plt.xlabel("t-SNE Component 1", fontsize=16)
+        plt.ylabel("t-SNE Component 2", fontsize=16)
+        plt.savefig("tsne_after_clustering.png")  # 保存聚类后的可视化结果
+
+        plt.show()
+
+        return labels
+            
+def generate_imp(gradients):
+
+    imp = []
+    for i, gradient in enumerate(gradients):
+        cos_sum = 0
+        for j, other_gradient in enumerate(gradients):
+            if i != j:  # 不计算同一源域的余弦相似度
+                cos_sum += F.cosine_similarity(gradient, other_gradient, dim=0)
+        imp.append(cos_sum)
+    return imp
+
 class ERM(Algorithm):
     """
     Empirical Risk Minimization (ERM)
     """
 
-    def __init__(self, input_shape, num_classes, num_domains, hparams):
+    def __init__(self, input_shape, num_classes, num_domains, hparams, soft_flag, num_cluster):
         super(ERM, self).__init__(input_shape, num_classes, num_domains, hparams)
         self.featurizer = networks.Featurizer(input_shape, self.hparams)
         self.classifier = nn.Linear(self.featurizer.n_outputs, num_classes)
@@ -107,7 +268,6 @@ class ERM(Algorithm):
 
     def predict(self, x):
         return self.network(x)
-
 
 class Mixstyle(Algorithm):
     """MixStyle w/o domain label (random shuffle)"""
@@ -1012,8 +1172,8 @@ class SagNet(Algorithm):
 
 
 class RSC(ERM):
-    def __init__(self, input_shape, num_classes, num_domains, hparams):
-        super(RSC, self).__init__(input_shape, num_classes, num_domains, hparams)
+    def __init__(self, input_shape, num_classes, num_domains, hparams, soft_flag, num_cluster):
+        super(RSC, self).__init__(input_shape, num_classes, num_domains, hparams, soft_flag, num_cluster)
         self.drop_f = (1 - hparams["rsc_f_drop_factor"]) * 100
         self.drop_b = (1 - hparams["rsc_b_drop_factor"]) * 100
         self.num_classes = num_classes

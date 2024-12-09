@@ -12,6 +12,8 @@ def _hparams(algorithm, dataset, random_state):
 
     hparams = {}
 
+    hparams["n_clusters"] = (8, 8)
+
     hparams["data_augmentation"] = (True, True)
     hparams["val_augment"] = (False, False)  # augmentation for in-domain validation set
     hparams["resnet18"] = (False, False)
